@@ -1,0 +1,83 @@
+#!/bin/bash
+
+bemenu_spice() {
+	local menu_prompt=$1
+	local number_of_columns="${2:-$(( $(sudo btrfs subvolume list -sc / | wc -l) + 1 ))}"
+
+	bemenu -icwn \
+	-W 0.2 \
+	-B 2 \
+	--bdr '#FFFFFFFF' \
+	--fixed-height \
+	--no-cursor \
+	--prompt $menu_prompt \
+	--list $number_of_columns down
+}
+
+list_snapshots() {
+	sudo btrfs subvolume list -sc / | \
+		cut --delimiter=' ' --fields='2 11 12'
+}
+
+show_snapshots() {
+	list_snapshots | \
+		bemenu_spice $(btrfs inspect-internal rootid /)
+	manage_snapshots
+}
+
+boot_from_snapshot() {
+	local files_to_be_changed="/etc/default/grub /etc/dracut.conf.d/luks.conf /etc/fstab"
+	local valid_subvolumes=$(sudo btrfs subvolume list -s / | \
+		cut --delimiter=' ' -f2 | \
+			tr '\n' ' ')
+	local subvolume_to_be_booted=$(list_snapshots | \
+		bemenu_spice $(btrfs inspect-internal rootid /) | \
+			cut --delimiter=' ' -f1)
+
+	for subvolid in $valid_subvolumes; do
+		# This statement has the potential to render the system UNBOOTABLE!!!
+		#
+		# For safety I use the global flag with sed so that the
+		# system will always boot even if it messes something else
+		# up when there are multiple instances of 'subvolid='.
+		if [ $subvolume_to_be_booted -eq $subvolid ]; then
+			notify-send --expire-time=15000 --urgency=critical "System is rebuilding..."
+
+			for file_path in $files_to_be_changed; do
+				sudo sed -Ei "s/subvolid=[[:digit:]]*/subvolid=${subvolume_to_be_booted}/g" $file_path
+			done;
+
+			sudo grub-mkconfig -o /boot/grub/grub.cfg
+			sudo dracut --force --kver 6.12.58-gentoo-dist
+			sudo reboot
+			exit 1
+		fi
+	done;
+
+	manage_snapshots
+}
+
+create_snapshot() {
+	sudo btrfs subvolume snapshot / /mnt/drive_root/snapshot_$(date +%F_%T)
+	manage_snapshots
+}
+
+delete_snapshot() {
+	local subvolume_to_be_deleted=$(list_snapshots | \
+		grep -v $(btrfs inspect-internal rootid /) | \
+			bemenu_spice $(btrfs inspect-internal rootid /) "$(sudo btrfs subvolume list -sc / | wc -l)" | \
+				cut --delimiter=' ' -f1)
+
+	sudo btrfs subvolume delete --subvolid $subvolume_to_be_deleted /
+	manage_snapshots
+}
+
+menu_selection=$(printf "Show Snapshots\nBoot from...\nCreate Snapshot\nDelete Snapshot" | bemenu_spice Snapshots 5)
+
+case $menu_selection in
+	'Show Snapshots')	show_snapshots;;
+	'Boot from...')		boot_from_snapshot;;
+	'Create Snapshot')	create_snapshot;;
+	'Delete Snapshot')	delete_snapshot;;
+esac
+
